@@ -1,0 +1,37 @@
+name: Compile SRS
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Sing-box
+        run: |
+          sudo apt-get update
+          curl -fsSL https://sing-box.app/gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/sagernet.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/sagernet.gpg] https://deb.sagernet.org/ * *" | sudo tee /etc/apt/sources.list.d/sagernet.list
+          sudo apt-get update
+          sudo apt-get install sing-box
+
+      - name: Convert TXT to JSON and compile SRS
+        run: |
+          jq -R '.' podkop_domains.txt | jq -s '{version: 1, rules: [{domain_suffix: .}]}' > rules.json
+          sing-box rule-set compile rules.json -o rules.srs
+
+      - name: Create Release and Upload SRS
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: latest
+          files: rules.srs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
