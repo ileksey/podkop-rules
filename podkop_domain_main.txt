@@ -99,6 +99,7 @@ security.iot.i.tplinknbu.com
 files.nexus-cdn.com
 rutor.info
 rutor.is
+rutracker.org
 kolbinreview.ru
 4pda.to
 api.github-store.org
