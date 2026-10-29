@@ -1,192 +1,127 @@
-        SING_BOX_INSTALL_VARIANT=""
-        msg "sing-box $SING_BOX_PINNED_VERSION is already installed; keeping it"
-    else
-        SING_BOX_INSTALL_VARIANT="pinned"
-        if [ -n "$current_version" ]; then
-            msg "Installed sing-box version is $current_version; will request exact version $SING_BOX_PINNED_VERSION"
-        else
-            msg "Will install exact sing-box version $SING_BOX_PINNED_VERSION"
-        fi
-    fi
+#!/bin/sh
+# shellcheck shell=dash
+
+REPO_OWNER="ushan0v"
+REPO_NAME="forkop"
+# Deliberately pinned versions: do not follow the latest GitHub release/feed version.
+FORKOP_PINNED_VERSION="1.0.5"
+SING_BOX_PINNED_VERSION="1.13.21-r1"
+
+REQUIRED_SPACE_KB=15360
+CONNECT_TIMEOUT_SECONDS=15
+METADATA_TIMEOUT_SECONDS=60
+DOWNLOAD_TIMEOUT_SECONDS=600
+
+PKG_IS_APK=0
+FETCHER=""
+TMP_DIR=""
+FORKOP_WAS_ENABLED=0
+FORKOP_WAS_RUNNING=0
+FORKOP_LEGACY_DETECTED=0
+FORKOP_I18N_REQUESTED=0
+INSTALLER_LANG="en"
+SING_BOX_INSTALL_VARIANT=""
+
+FORKOP_RELEASE_JSON=""
+FORKOP_RELEASE_TAG=""
+FORKOP_BACKEND_URL=""
+FORKOP_BACKEND_NAME=""
+FORKOP_BACKEND_FILE=""
+FORKOP_APP_URL=""
+FORKOP_APP_NAME=""
+FORKOP_APP_FILE=""
+FORKOP_I18N_URL=""
+FORKOP_I18N_NAME=""
+FORKOP_I18N_FILE=""
+FORKOP_PACKAGE_VERSION=""
+LEGACY_BRAND="$(printf '\160\157\144\153\157\160')"
+LEGACY_BACKEND_PACKAGE="${LEGACY_BRAND}-plus"
+LEGACY_CONFIG_PACKAGE_ALT="${LEGACY_BRAND}_plus"
+LEGACY_CONFIG_BACKUP=""
+
+command -v apk >/dev/null 2>&1 && PKG_IS_APK=1
+
+msg() {
+    printf '\033[32;1m%s\033[0m\n' "$1"
 }
 
-install_selected_sing_box() {
-    [ "$SING_BOX_INSTALL_VARIANT" = "pinned" ] || {
-        msg "$(installer_text sing_box_skip_msg)"
-        return 0
-    }
-
-    msg "Installing sing-box=$SING_BOX_PINNED_VERSION from configured OpenWrt package feeds"
-    if [ "$PKG_IS_APK" -eq 1 ]; then
-        apk add --upgrade "sing-box=$SING_BOX_PINNED_VERSION" </dev/null ||
-            fail "Could not install sing-box=$SING_BOX_PINNED_VERSION. Check whether this exact package version exists in the configured APK feeds for this device. No other version will be accepted."
-    else
-        opkg install --force-downgrade "sing-box=$SING_BOX_PINNED_VERSION" </dev/null ||
-            fail "Could not install sing-box=$SING_BOX_PINNED_VERSION. Check whether this exact package version exists in the configured OPKG feeds for this device. No other version will be accepted."
-    fi
-
-    current_version="$(sing_box_installed_version)"
-    [ "$current_version" = "$SING_BOX_PINNED_VERSION" ] ||
-        fail "sing-box version verification failed: expected $SING_BOX_PINNED_VERSION, detected '${current_version:-not installed}'"
-    msg "Verified sing-box version $current_version"
+warn() {
+    printf '\033[33;1m%s\033[0m\n' "$1"
 }
 
-cleanup_legacy_installation() {
-    state_file="$TMP_DIR/install-state.env"
-
-    install_json_ucode installer-cleanup-legacy >"$state_file" ||
-        fail "Failed to prepare the system before Forkop package installation"
-
-    # shellcheck disable=SC1090
-    . "$state_file"
+fail() {
+    printf '\033[31;1m%s\033[0m\n' "$1" >&2
+    exit 1
 }
 
-detect_legacy_installation() {
-    FORKOP_LEGACY_DETECTED=0
-    LEGACY_CONFIG_BACKUP=""
+usage() {
+    cat <<EOF
+Usage: $0
 
-    if ! pkg_is_installed "$LEGACY_BACKEND_PACKAGE"; then
-        legacy_config_present=0
-        for legacy_config_path in \
-            "/etc/config/$LEGACY_BACKEND_PACKAGE" \
-            "/etc/config/$LEGACY_CONFIG_PACKAGE_ALT"; do
-            if [ -r "$legacy_config_path" ]; then
-                legacy_config_present=1
-                break
-            fi
-        done
-        [ "$legacy_config_present" -eq 1 ] || return 0
-    fi
+Installs pinned Forkop packages (version 1.0.5) and sing-box (version 1.13.21-r1):
+  - forkop
+  - luci-app-forkop
+  - luci-i18n-forkop-ru when requested or when LuCI language is Russian
 
-    FORKOP_LEGACY_DETECTED=1
-    for legacy_config_path in \
-        "/etc/config/$LEGACY_BACKEND_PACKAGE" \
-        "/etc/config/$LEGACY_CONFIG_PACKAGE_ALT"; do
-        if [ -r "$legacy_config_path" ]; then
-            LEGACY_CONFIG_BACKUP="$TMP_DIR/legacy-config.backup"
-            cp "$legacy_config_path" "$LEGACY_CONFIG_BACKUP" ||
-                fail "Failed to back up the legacy configuration"
-            break
-        fi
+Can also install or switch sing-box variant:
+  - stable sing-box from OpenWrt feeds
+  - sing-box-extended from GitHub OpenWrt packages (for xHTTP support)
+EOF
+}
+
+parse_args() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                fail "Unknown installer option: $1"
+                ;;
+        esac
+        shift
     done
-
-    msg "Legacy installation detected; its packages will be removed and its configuration will be upgraded"
 }
 
-decide_i18n_installation() {
-    luci_lang="$(get_luci_main_lang)"
+cleanup() {
+    [ -n "$TMP_DIR" ] && rm -rf "$TMP_DIR"
+}
 
-    detect_installer_language
+read_openwrt_release_value() {
+    key="$1"
 
-    if pkg_is_installed "luci-i18n-forkop-ru"; then
-        FORKOP_I18N_REQUESTED=1
-        msg "$(installer_text i18n_installed)"
+    [ -f /etc/openwrt_release ] || return 0
+    sed -n "s/^${key}='\(.*\)'/\1/p" /etc/openwrt_release 2>/dev/null | head -n 1
+}
+
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+init_tmp_dir() {
+    TMP_DIR="$(mktemp -d /tmp/forkop.XXXXXX 2>/dev/null || true)"
+
+    if [ -z "$TMP_DIR" ]; then
+        TMP_DIR="/tmp/forkop.$$"
+        mkdir -p "$TMP_DIR" || fail "Failed to create temporary directory: $TMP_DIR"
+    fi
+}
+
+detect_fetcher() {
+    if command_exists wget; then
+        FETCHER="wget"
         return 0
     fi
 
-    if [ "$FORKOP_LEGACY_DETECTED" -eq 1 ] &&
-        pkg_is_installed "luci-i18n-${LEGACY_BACKEND_PACKAGE}-ru"; then
-        FORKOP_I18N_REQUESTED=1
-        msg "$(installer_text i18n_installed)"
+    if command_exists curl; then
+        FETCHER="curl"
         return 0
     fi
 
-    case "$luci_lang" in
-        ru|ru_*|ru-*)
-            FORKOP_I18N_REQUESTED=1
-            INSTALLER_LANG="ru"
-            msg "$(installer_text luci_ru)"
-            return 0
-            ;;
-    esac
-
-    if numbered_yes_no_prompt "$(installer_text i18n_prompt)"; then
-        FORKOP_I18N_REQUESTED=1
-        INSTALLER_LANG="ru"
-        return 0
-    fi
-
-    warn "$(installer_text i18n_skip)"
+    fail "wget or curl is required to download Forkop"
 }
 
-download_forkop_packages() {
-    FORKOP_BACKEND_FILE="$TMP_DIR/$FORKOP_BACKEND_NAME"
-    FORKOP_APP_FILE="$TMP_DIR/$FORKOP_APP_NAME"
-    FORKOP_I18N_FILE=""
-
-    download_with_retry "$FORKOP_BACKEND_URL" "$FORKOP_BACKEND_FILE" "$FORKOP_BACKEND_NAME" || fail "Failed to download $FORKOP_BACKEND_NAME"
-    download_with_retry "$FORKOP_APP_URL" "$FORKOP_APP_FILE" "$FORKOP_APP_NAME" || fail "Failed to download $FORKOP_APP_NAME"
-
-    if [ -n "$FORKOP_I18N_URL" ]; then
-        FORKOP_I18N_FILE="$TMP_DIR/$FORKOP_I18N_NAME"
-        download_with_retry "$FORKOP_I18N_URL" "$FORKOP_I18N_FILE" "$FORKOP_I18N_NAME" || fail "Failed to download $FORKOP_I18N_NAME"
-    fi
-}
-
-install_backend_package() {
-    pkg_install_files "$FORKOP_BACKEND_FILE" || fail "forkop installation failed"
-}
-
-migrate_legacy_configuration() {
-    [ "$FORKOP_LEGACY_DETECTED" -eq 1 ] || return 0
-
-    if [ -n "$LEGACY_CONFIG_BACKUP" ]; then
-        cp "$LEGACY_CONFIG_BACKUP" /etc/config/forkop ||
-            fail "Failed to restore the legacy configuration for migration"
-        chmod 0644 /etc/config/forkop ||
-            fail "Failed to set permissions on the Forkop configuration"
-
-        msg "Migrating the legacy configuration to Forkop"
-        if ! FORKOP_CONFIG_NAME="forkop" \
-            FORKOP_LIB="/usr/lib/forkop" \
-            ucode -L /usr/lib/forkop /usr/lib/forkop/config/migration.uc migrate-podkop; then
-            cp "$LEGACY_CONFIG_BACKUP" /etc/config/forkop 2>/dev/null || true
-            fail "Legacy configuration migration failed; the original configuration was restored"
-        fi
-    else
-        warn "The legacy package had no readable configuration; Forkop defaults will be used"
-    fi
-
-    install_json_ucode installer-finalize-legacy ||
-        fail "Failed to remove legacy configuration and cache files after migration"
-}
-
-install_ui_packages() {
-    pkg_install_files "$FORKOP_APP_FILE" || fail "luci-app-forkop installation failed"
-
-    if [ -n "$FORKOP_I18N_FILE" ]; then
-        pkg_install_files "$FORKOP_I18N_FILE" || fail "luci-i18n-forkop-ru installation failed"
-    fi
-}
-
-post_install() {
-    FORKOP_WAS_ENABLED="$FORKOP_WAS_ENABLED" FORKOP_WAS_RUNNING="$FORKOP_WAS_RUNNING" \
-        install_json_ucode installer-post-install ||
-        fail "Failed to complete Forkop post-install actions"
-}
-
-main() {
-    trap cleanup EXIT
-    trap 'exit 129' HUP
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
-
-    parse_args "$@"
-    check_root
-    init_tmp_dir
-    detect_fetcher
-    sync_time
-    check_system
-
-    detect_legacy_installation
-    decide_i18n_installation
-    select_sing_box_installation
-
-    pkg_list_update || fail "Failed to update package lists"
-    ensure_bootstrap_ucode_runtime
-
-    resolve_forkop_release
-    download_forkop_packages
-
-    cleanup_legacy_installation
-    install_backend_package
+run_with_deadline() {
+    forkop_deadline_seconds="$1"
+    shift
