@@ -68,17 +68,32 @@ else
     say 'LuCI не обнаружен; будет установлен только пакет zapret2.'
 fi
 
-# Avoid silently replacing an unmanaged installation in /opt.
+# If an unmanaged /opt/zapret2 exists, preserve it by moving it aside.
+# This commonly happens when upstream install_easy.sh extracted sources and then
+# stopped at "build tools not found". Never delete the directory automatically.
+BACKUP_DIR=''
 if [ -d /opt/zapret2 ] && ! apk info -e zapret2 >/dev/null 2>&1; then
-    fail 'Найден /opt/zapret2, но пакет zapret2 не зарегистрирован в APK. Чтобы не перезаписать существующую установку, остановлено. Сначала проверь/сохрани этот каталог.'
+    STAMP="$(date '+%Y%m%d-%H%M%S' 2>/dev/null || echo unknown)"
+    BACKUP_DIR="/opt/zapret2.backup-$STAMP-$$"
+    say "Найден /opt/zapret2, не зарегистрированный в APK."
+    say "Чтобы сохранить прежние файлы и освободить путь для пакета, перемещаю каталог в: $BACKUP_DIR"
+    mv /opt/zapret2 "$BACKUP_DIR" || fail 'Не удалось сохранить существующий /opt/zapret2. Установка остановлена.'
 fi
 
 say ''
 say 'Установка пакетов через APK (подпись проверяется менеджером пакетов)...'
 if [ "$INSTALL_LUCI" -eq 1 ]; then
-    apk add "$CORE_APK" "$LUCI_APK" || fail 'APK не смог установить пакеты. Смотри сообщение APK выше; Forkop/Sing-box не удалялись намеренно.'
+    if ! apk add "$CORE_APK" "$LUCI_APK"; then
+        say 'ОШИБКА: APK не смог установить пакеты. Forkop/Sing-box не удалялись намеренно.' >&2
+        [ -z "$BACKUP_DIR" ] || say "Сохранённый прежний каталог: $BACKUP_DIR" >&2
+        exit 1
+    fi
 else
-    apk add "$CORE_APK" || fail 'APK не смог установить пакет zapret2. Смотри сообщение APK выше.'
+    if ! apk add "$CORE_APK"; then
+        say 'ОШИБКА: APK не смог установить пакет zapret2.' >&2
+        [ -z "$BACKUP_DIR" ] || say "Сохранённый прежний каталог: $BACKUP_DIR" >&2
+        exit 1
+    fi
 fi
 
 say ''
