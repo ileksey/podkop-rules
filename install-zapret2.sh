@@ -1,69 +1,87 @@
 #!/bin/sh
-# Separate bootstrap installer for the official bol-van/zapret2 on OpenWrt.
-# It does not install or modify Forkop / sing-box directly.
+# Universal installer for bol-van/zapret2 packaged for OpenWrt 25.12+ (APK).
+# Uses published OpenWrt APK packages from 1andrevich/zapret2-openwrt because
+# the upstream source archive does not provide router-native binaries for every target.
+# Does not build software on the router and does not directly edit Forkop/sing-box config.
 
-set -u
+set -eu
 
-REPO_URL="https://github.com/bol-van/zapret2/archive/refs/heads/master.tar.gz"
-TMP_BASE="/tmp/zapret2-bootstrap.$$"
-ARCHIVE="$TMP_BASE/zapret2.tar.gz"
-SRC_DIR="$TMP_BASE/source"
+RELEASE_BASE='https://github.com/1andrevich/zapret2-openwrt/releases/latest/download'
+KEY_NAME='zapret2-1andrevich.pub'
+KEY_URL="$RELEASE_BASE/$KEY_NAME"
+TMP_DIR="/tmp/zapret2-installer.$$"
 
 say() { printf '%s\n' "$*"; }
-fail() { say "ERROR: $*" >&2; exit 1; }
-cleanup() { rm -rf "$TMP_BASE"; }
+fail() { say "ОШИБКА: $*" >&2; exit 1; }
+cleanup() { rm -rf "$TMP_DIR"; }
 trap cleanup EXIT HUP INT TERM
 
-[ "$(id -u 2>/dev/null)" = "0" ] || fail "Запусти скрипт от root (например, через SSH под root)."
-[ -r /etc/openwrt_release ] || fail "Скрипт рассчитан на OpenWrt; /etc/openwrt_release не найден."
+[ "$(id -u 2>/dev/null || echo 1)" = 0 ] || fail 'Запусти скрипт от root.'
+[ -r /etc/openwrt_release ] || fail 'Это не OpenWrt: /etc/openwrt_release не найден.'
+command -v wget >/dev/null 2>&1 || fail 'Не найден wget.'
+command -v apk >/dev/null 2>&1 || fail 'Не найден apk. Этот установщик предназначен для OpenWrt 25.12+ с APK.'
+[ -e /lib/apk/db/installed ] || fail 'Не найдена база APK (/lib/apk/db/installed). Отказ от установки, чтобы не перепутать менеджеры пакетов.'
 
-if ! command -v wget >/dev/null 2>&1; then
-    fail "Не найден wget. Установи его через менеджер пакетов OpenWrt и повтори запуск."
-fi
-if ! command -v tar >/dev/null 2>&1; then
-    fail "Не найден tar. Установи его через менеджер пакетов OpenWrt и повтори запуск."
-fi
+OPENWRT_ARCH="$(sed -n 's/^OPENWRT_ARCH=//p' /etc/os-release 2>/dev/null | head -n 1 | tr -d "\"'")"
+[ -n "$OPENWRT_ARCH" ] || fail 'Не удалось определить OPENWRT_ARCH из /etc/os-release.'
 
-say "============================================================"
-say " Установка официального bol-van/zapret2 для OpenWrt"
-say "============================================================"
-say "Будет скачан текущий исходный код из официального GitHub-репозитория."
-say "Далее запустится штатный install_easy.sh проекта."
-say "По умолчанию штатный установщик использует каталог /opt/zapret2."
-say ""
-say "ВАЖНО: установка zapret2 может менять правила firewall и параметры flow offloading."
-say "На роутере уже используется Forkop/Sing-box; совместимость правил заранее не гарантируется."
-say "Скрипт не удаляет Forkop и Sing-box, но после установки нужно проверить маршрутизацию и доступ в интернет."
-say ""
-# Не запрашиваем подтверждение здесь: скрипт обычно запускается через wget | sh,
-# где stdin занят содержимым скрипта. Предупреждения выше выводятся до продолжения.
-say "Первое подтверждение пропущено; продолжаем установку."
+say '============================================================'
+say ' Установка zapret2 для OpenWrt 25.12+ (APK)'
+say '============================================================'
+say "Архитектура пакета: $OPENWRT_ARCH"
+say 'Используется готовый пакет bol-van/zapret2, собранный для OpenWrt.'
+say 'Это позволяет избежать ошибки upstream-установщика «build tools not found». '
+say ''
+say 'ВНИМАНИЕ: установка может добавить/изменить правила firewall.'
+say 'Forkop/Sing-box не удаляются, но совместимость маршрутизации не гарантируется.'
+say 'Первое подтверждение пропущено для совместимости с запуском wget | sh.'
+say ''
 
-mkdir -p "$TMP_BASE" "$SRC_DIR" || fail "Не удалось создать временный каталог $TMP_BASE"
-say ""
-say "Скачивание исходников zapret2..."
-wget -O "$ARCHIVE" "$REPO_URL" || fail "Не удалось скачать архив. Проверь интернет-доступ и DNS на роутере."
-[ -s "$ARCHIVE" ] || fail "Скачанный архив пуст."
+mkdir -p "$TMP_DIR" || fail 'Не удалось создать временный каталог.'
+CORE_APK="$TMP_DIR/zapret2.apk"
+LUCI_APK="$TMP_DIR/luci-app-zapret2.apk"
+KEY_FILE="$TMP_DIR/$KEY_NAME"
+KEY_DEST="/etc/apk/keys/$KEY_NAME"
 
-say "Распаковка..."
-tar -xzf "$ARCHIVE" -C "$SRC_DIR" || fail "Не удалось распаковать архив (нужна поддержка gzip в tar)."
-
-INSTALLER="$(find "$SRC_DIR" -type f -name install_easy.sh 2>/dev/null | head -n 1)"
-[ -n "$INSTALLER" ] && [ -f "$INSTALLER" ] || fail "В архиве не найден официальный install_easy.sh."
-
-say ""
-say "Запуск штатного установщика zapret2."
-say "Отвечай на его вопросы внимательно; если он предлагает заменить существующий /opt/zapret2, не соглашайся, если там уже есть нужная установка."
-say "------------------------------------------------------------"
-cd "$(dirname "$INSTALLER")" || fail "Не удалось перейти в каталог исходников."
-sh "$INSTALLER"
-RC=$?
-if [ "$RC" -ne 0 ]; then
-    fail "Штатный установщик завершился с кодом $RC. Вывод выше содержит причину."
+say 'Скачивание ключа подписи пакетов...'
+wget -q -O "$KEY_FILE" "$KEY_URL" || fail 'Не удалось скачать ключ подписи.'
+[ -s "$KEY_FILE" ] || fail 'Файл ключа пуст.'
+mkdir -p /etc/apk/keys || fail 'Не удалось создать /etc/apk/keys.'
+if [ -f "$KEY_DEST" ]; then
+    say "Ключ уже существует: $KEY_DEST (не перезаписываю)."
+else
+    cp "$KEY_FILE" "$KEY_DEST" || fail 'Не удалось установить ключ подписи.'
+    chmod 644 "$KEY_DEST" 2>/dev/null || true
 fi
 
-say ""
-say "Штатный установщик завершился без ошибки."
-say "Проверь состояние службы командой: /opt/zapret2/init.d/openwrt/zapret2 status"
-say "Если команда не найдена, проверь каталог установки /opt/zapret2."
-exit 0
+say 'Скачивание zapret2 для определённой архитектуры...'
+wget -O "$CORE_APK" "$RELEASE_BASE/zapret2_${OPENWRT_ARCH}.apk" || fail "Для архитектуры '$OPENWRT_ARCH' не удалось скачать пакет. Возможно, она пока не поддерживается опубликованными сборками."
+[ -s "$CORE_APK" ] || fail 'Скачанный пакет zapret2 пуст.'
+
+INSTALL_LUCI=0
+if [ -f /www/cgi-bin/luci ] || [ -d /www/luci-static ]; then
+    say 'Обнаружен LuCI; дополнительно устанавливаю интерфейс управления.'
+    wget -O "$LUCI_APK" "$RELEASE_BASE/luci-app-zapret2.apk" || fail 'Не удалось скачать luci-app-zapret2.apk.'
+    [ -s "$LUCI_APK" ] || fail 'Скачанный пакет LuCI пуст.'
+    INSTALL_LUCI=1
+else
+    say 'LuCI не обнаружен; будет установлен только пакет zapret2.'
+fi
+
+# Avoid silently replacing an unmanaged installation in /opt.
+if [ -d /opt/zapret2 ] && ! apk info -e zapret2 >/dev/null 2>&1; then
+    fail 'Найден /opt/zapret2, но пакет zapret2 не зарегистрирован в APK. Чтобы не перезаписать существующую установку, остановлено. Сначала проверь/сохрани этот каталог.'
+fi
+
+say ''
+say 'Установка пакетов через APK (подпись проверяется менеджером пакетов)...'
+if [ "$INSTALL_LUCI" -eq 1 ]; then
+    apk add "$CORE_APK" "$LUCI_APK" || fail 'APK не смог установить пакеты. Смотри сообщение APK выше; Forkop/Sing-box не удалялись намеренно.'
+else
+    apk add "$CORE_APK" || fail 'APK не смог установить пакет zapret2. Смотри сообщение APK выше.'
+fi
+
+say ''
+say 'Установка пакетов завершена.'
+say 'Проверь статус службы и настройки в LuCI → Службы → Zapret2 (если LuCI установлен).'
+say 'После установки проверь доступ в интернет и работу правил Forkop/Sing-box.'
